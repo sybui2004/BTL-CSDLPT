@@ -1,28 +1,29 @@
 import Interface
-
+import time
 DATABASE_NAME = 'dds_assgn1'
 
 # TODO: Change these as per your code
 RATINGS_TABLE = 'ratings'
 RANGE_TABLE_PREFIX = 'range_part'
 RROBIN_TABLE_PREFIX = 'rrobin_part'
-USER_ID_COLNAME = 'userid'
-MOVIE_ID_COLNAME = 'movieid'
-RATING_COLNAME = 'rating'
 INPUT_FILE_PATH = "C:/Users/MSI-PC/Documents/BTL-CSDLPT/ratings.dat"
-ACTUAL_ROWS_IN_INPUT_FILE = 20  # Number of lines in the input file
+N_PARTITIONS = 5
 
-# Kết nối tới database (đổi user, password, dbname nếu cần)
+# Connect to database
 conn = Interface.getopenconnection(user='postgres', password='1234', dbname=DATABASE_NAME)
 
-# 1. Load dữ liệu vào bảng Ratings
+start = time.time()
+
 Interface.loadratings(RATINGS_TABLE, INPUT_FILE_PATH, conn)
+print("Load xong:", time.time() - start, "giây")
 
-# 2. Phân mảnh theo range
-Interface.rangepartition(RATINGS_TABLE, 5, conn)
+start = time.time()
+Interface.rangepartition(RATINGS_TABLE, N_PARTITIONS, conn)
+print("Range partition xong:", time.time() - start, "giây")
 
-# 3. Phân mảnh theo round robin
-Interface.roundrobinpartition(RATINGS_TABLE, 5, conn)
+start = time.time()
+Interface.roundrobinpartition(RATINGS_TABLE, N_PARTITIONS, conn)
+print("Round robin partition xong:", time.time() - start, "giây")
 
 # 4. Chèn một dòng mới theo round robin
 Interface.roundrobininsert(RATINGS_TABLE, 100, 200, 3.5, conn)
@@ -34,3 +35,4 @@ print("Đã thực hiện xong các thao tác với ratings.dat!")
 
 # Đóng kết nối khi xong
 conn.close() 
+
