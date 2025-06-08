@@ -16,7 +16,7 @@ ACTUAL_ROWS_IN_INPUT_FILE = 10000054  # Number of lines in the input file
 import psycopg2
 import traceback
 import testHelper
-import Interface as MyAssignment
+import Interface_metadata as MyAssignment
 
 if __name__ == '__main__':
     try:
