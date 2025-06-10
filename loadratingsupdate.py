@@ -1,7 +1,5 @@
 import psycopg2
 from io import StringIO
-import time
-import functools
 import duckdb
 import os
 import tempfile
@@ -9,96 +7,7 @@ import polars as pl
 
 DATABASE_NAME = 'dds_assgn1'
 
-def loadratingsusepolars(ratingstablename, ratingsfilepath, openconnection):
-    conn = openconnection
-
-    # Đọc file ratings sử dụng thư viện Polars
-    # - Mỗi dòng được đọc là một chuỗi string duy nhất
-    # - Dùng separator="\n" để mỗi dòng là một dòng riêng biệt
-    # - Đặt tên cột là "line"
-    lines = pl.read_csv(ratingsfilepath, separator="\n", has_header=False, new_columns=["line"])
-
-    # Tách cột line thành danh sách các trường dựa vào ký tự "::"
-    # - Sử dụng hàm str.split("::") để tách dòng
-    # - Sau đó chọn từng phần tử: 0 là userid, 1 là movieid, 2 là rating
-    # - Ép kiểu dữ liệu: Int32, Float32
-    df = lines.with_columns([
-        pl.col("line").str.split("::").alias("fields")
-    ]).select([
-        pl.col("fields").list.get(0).cast(pl.Int32).alias("userid"),
-        pl.col("fields").list.get(1).cast(pl.Int32).alias("movieid"),
-        pl.col("fields").list.get(2).cast(pl.Float32).alias("rating")
-    ])
-
-    # Ghi DataFrame ra một file CSV tạm để dùng trong COPY
-    # - delete=False: không xóa file ngay lập tức để có thể đọc lại sau đó
-    # - newline='': không thêm dòng trống thừa 
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, newline='', suffix=".csv") as tmpfile:
-        csv_path = tmpfile.name
-        # Ghi dữ liệu dưới dạng CSV, không ghi header vì PostgreSQL COPY không cần
-        df.write_csv(csv_path, has_header=False)
-
-    # Tạo bảng trong PostgreSQL có 3 cột: userid, movieid, rating
-    cur = conn.cursor()
-    cur.execute(f"CREATE TABLE {ratingstablename} (userid INTEGER, movieid INTEGER, rating FLOAT);")
-
-    # Import dữ liệu từ file CSV vào PostgreSQL bằng COPY
-    with open(csv_path, 'r') as f:
-        cur.copy_expert(f"COPY {ratingstablename} FROM STDIN WITH (FORMAT CSV)", f)
-
-    # Lưu thay đổi và đóng cursor
-    conn.commit()
-    cur.close()
-
-    # Xóa file tạm 
-    os.remove(csv_path)
-    
-def loadratingsuseduckdb(ratingstablename, ratingsfilepath, openconnection):
-    conn = openconnection  
-
-    # Sử dụng DuckDB để đọc file gốc chứa dữ liệu ratings
-    # - DuckDB đọc từng dòng trong file như 1 chuỗi
-    # - Mỗi dòng có định dạng: "userid::movieid::rating::timestamp"
-    # - split_part(line, '::', n) dùng để tách trường thứ n (bắt đầu từ 1)
-    # - Ép kiểu dữ liệu thành INTEGER, FLOAT 
-    # - Chỉ lấy những dòng hợp lệ
-    con_duck = duckdb.connect()
-    df = con_duck.execute(f"""
-        SELECT 
-            CAST(split_part(line, '::', 1) AS INTEGER) AS userid,
-            CAST(split_part(line, '::', 2) AS INTEGER) AS movieid,
-            CAST(split_part(line, '::', 3) AS FLOAT) AS rating
-        FROM read_csv_auto('{ratingsfilepath}', delim='\n', header=False) AS t(line)
-        WHERE line IS NOT NULL AND length(line) > 0
-    """).fetchdf()
-    con_duck.close()  # Đóng kết nối DuckDB sau khi đã lấy dữ liệu
-
-    # Ghi dữ liệu từ DuckDB DataFrame ra một file CSV tạm
-    # - tempfile.NamedTemporaryFile dùng để tạo file tạm, không xóa ngay (delete=False)
-    # - newline='' để tránh lỗi ghi thừa dòng trên một số hệ điều hành
-    # - suffix='.csv' đảm bảo đúng định dạng file CSV
-    with tempfile.NamedTemporaryFile(mode='w', delete=False, newline='', suffix=".csv") as tmpfile:
-        csv_path = tmpfile.name  # Lưu lại đường dẫn của file tạm
-        df.to_csv(csv_path, index=False, header=False)  # Ghi dữ liệu không có header, không có index
-
-    # Tạo bảng trong PostgreSQL với 3 cột phù hợp: userid, movieid, rating
-    cur = conn.cursor()
-    cur.execute(f"CREATE TABLE {ratingstablename} (userid INTEGER, movieid INTEGER, rating FLOAT);")
-
-    # Dùng lệnh COPY để nạp dữ liệu từ file CSV vào bảng PostgreSQL
-    # - COPY FROM STDIN: nhập dữ liệu từ file thông qua Python file handle
-    # - FORMAT CSV: định dạng dữ liệu là CSV (không có header, phân cách bằng dấu phẩy)
-    with open(csv_path, 'r') as f:
-        cur.copy_expert(f"COPY {ratingstablename} FROM STDIN WITH (FORMAT CSV)", f)
-
-    # Lưu thay đổi và đóng cursor
-    conn.commit()
-    cur.close()
-
-    # Xóa file tạm 
-    os.remove(csv_path)
-    
-def loadratingsbestchoice(ratingstablename, ratingsfilepath, openconnection):
+def loadratingsnouselib(ratingstablename, ratingsfilepath, openconnection):
     # Tạo database 
     create_db(DATABASE_NAME)
     con = openconnection
@@ -143,6 +52,146 @@ def loadratingsbestchoice(ratingstablename, ratingsfilepath, openconnection):
         con.rollback()
         cur.close()
         raise e
+
+def loadratingsuseduckdb(ratingstablename, ratingsfilepath, openconnection):
+    """
+    Hàm load dữ liệu ratings từ file vào PostgreSQL sử dụng DuckDB làm công cụ ETL trung gian
+    """
+    # Tạo database
+    create_db('dds_assgn1')
+    
+    # Sử dụng kết nối PostgreSQL được truyền vào
+    conn = openconnection
+    cur = conn.cursor()  # Tạo cursor để thực thi các lệnh SQL
+    
+    try:
+        con_duck = duckdb.connect()
+        
+        # File ratings có format: userid::movieid::rating::timestamp
+        # Định nghĩa 4 cột đầu vào đều là VARCHAR
+        column_def = {
+            'column1': 'VARCHAR',  # userid
+            'column2': 'VARCHAR',  # movieid
+            'column3': 'VARCHAR',  # rating 
+            'column4': 'VARCHAR'   # timestamp 
+        }
+        
+        # Tạo file CSV tạm để lưu dữ liệu đã được DuckDB xử lý và làm sạch
+        # delete=False: giữ file sau khi đóng để PostgreSQL có thể đọc
+        # newline='': tránh thêm dòng trống
+        # suffix='.csv': file có đuôi .csv
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, newline='', suffix='.csv') as tmpfile:
+            csv_path = tmpfile.name  # Lưu đường dẫn file tạm
+        
+        # DuckDB thực hiện: đọc file -> transform -> xuất CSV
+        con_duck.execute(f"""
+            COPY (
+                SELECT
+                    CAST(column1 AS INTEGER) AS userid,      -- Chuyển đổi userid từ VARCHAR sang INTEGER
+                    CAST(column2 AS INTEGER) AS movieid,     -- Chuyển đổi movieid từ VARCHAR sang INTEGER  
+                    CAST(column3 AS FLOAT) AS rating         -- Chuyển đổi rating từ VARCHAR sang FLOAT
+                FROM read_csv('{ratingsfilepath}',           -- Đọc file đầu vào
+                    delim='::',                              -- Phân tách bằng dấu '::'
+                    columns=$coldef,                         -- Sử dụng định nghĩa cột ở trên
+                    header=False,                            -- File không có header
+                    ignore_errors=True                       -- Bỏ qua các dòng lỗi
+                )
+            )
+            TO '{csv_path}' (FORMAT CSV, HEADER FALSE);      -- Xuất ra file CSV tạm (không có header)
+        """, {'coldef': column_def})
+        
+        # Đóng kết nối DuckDB 
+        con_duck.close()
+        
+        # Tạo bảng ratings với 3 cột cần thiết (bỏ qua timestamp)
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {ratingstablename} (
+                userid INTEGER,    -- ID người dùng
+                movieid INTEGER,   -- ID phim  
+                rating FLOAT       -- Điểm đánh giá
+            );
+        """)
+        
+        # Mở file CSV tạm và copy trực tiếp vào PostgreSQL
+        with open(csv_path, 'r') as f:
+            # copy_expert: phương thức hiệu quả nhất để import bulk data vào PostgreSQL
+            cur.copy_expert(f"COPY {ratingstablename} FROM STDIN WITH (FORMAT CSV)", f)
+        
+        # Lưu thay đổi
+        conn.commit() 
+        
+    except Exception as e:
+        # Nếu có lỗi xảy ra, rollback 
+        conn.rollback()
+        raise e 
+        
+    finally:
+        # Đóng cursor
+        cur.close() 
+        
+        # Xóa file tạm
+        if os.path.exists(csv_path):
+            os.remove(csv_path)
+
+def loadratingusepolar(ratingstablename, ratingsfilepath, openconnection):
+    # Tạo database 
+    create_db('dds_assgn1')
+
+    conn = openconnection
+    cur = conn.cursor()
+
+    try:
+        # Tối ưu cấu hình PostgreSQL để tăng tốc độ INSERT/COPY
+        cur.execute("SET synchronous_commit = OFF;")  # Không cần ghi log ngay mỗi lần COMMIT
+        cur.execute("SET work_mem = '1024MB';")       # Tăng bộ nhớ RAM dùng cho các thao tác xử lý
+        cur.execute("SET maintenance_work_mem = '2097151kB';")  # Tăng RAM cho CREATE TABLE và COPY
+
+        # Tạo bảng nếu chưa có, với fillfactor=100 (giảm phân mảnh khi ghi nhiều)
+        cur.execute(f"""
+            CREATE TABLE IF NOT EXISTS {ratingstablename} (
+                userid INTEGER,
+                movieid INTEGER,
+                rating FLOAT
+            ) WITH (fillfactor=100);
+        """)
+
+        # Đọc file ratings từ đường dẫn `ratingsfilepath`
+        # - Mỗi dòng là một chuỗi string (dạng: "userid::movieid::rating::timestamp")
+        # - Dùng Polars đọc theo dòng (mỗi dòng là 1 row duy nhất)
+        lines = pl.read_csv(ratingsfilepath, separator="\n", has_header=False, new_columns=["line"])
+
+        # Tách từng dòng thành danh sách các trường (userid, movieid, rating)
+        df = lines.with_columns([
+            pl.col("line").str.split("::").alias("fields")
+        ]).select([
+            pl.col("fields").list.get(0).cast(pl.Int32).alias("userid"),
+            pl.col("fields").list.get(1).cast(pl.Int32).alias("movieid"),
+            pl.col("fields").list.get(2).cast(pl.Float32).alias("rating")  # timestamp bỏ qua
+        ])
+
+        # Ghi dữ liệu Polars DataFrame ra một file CSV tạm thời (để COPY vào PostgreSQL)
+        # - `include_header=False` vì PostgreSQL không cần dòng tiêu đề
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, newline='', suffix=".csv") as tmpfile:
+            csv_path = tmpfile.name
+            df.write_csv(csv_path, include_header=False)
+
+        # Sử dụng COPY để import dữ liệu nhanh từ file CSV vào bảng PostgreSQL
+        with open(csv_path, 'r') as f:
+            cur.copy_expert(f"COPY {ratingstablename} FROM STDIN WITH (FORMAT CSV)", f)
+
+        # Lưu thay đổi
+        conn.commit()
+
+    except Exception as e:
+        # Nếu có lỗi thì rollback
+        conn.rollback()
+        raise e
+
+    finally:
+        # Đóng cursor và xóa file tạm
+        cur.close()
+        if os.path.exists(csv_path):
+            os.remove(csv_path)
     
 # Hàm getopenconnection dùng để tạo và trả về một kết nối tới cơ sở dữ liệu PostgreSQL
 def getopenconnection(user='postgres', password='1234', dbname='postgres'):
@@ -155,7 +204,6 @@ def getopenconnection(user='postgres', password='1234', dbname='postgres'):
         "dbname='" + dbname + "' user='" + user + "' host='localhost' password='" + password + "'"
     )
 
-    
 def create_db(dbname):
     """
     Tạo một cơ sở dữ liệu mới trong PostgreSQL.

@@ -11,12 +11,12 @@ USER_ID_COLNAME = 'userid'
 MOVIE_ID_COLNAME = 'movieid'
 RATING_COLNAME = 'rating'
 INPUT_FILE_PATH = 'ratings.dat'
-ACTUAL_ROWS_IN_INPUT_FILE = 10000054  # Number of lines in the input file 
+ACTUAL_ROWS_IN_INPUT_FILE = 10000054  # số dòng dữ liệu file ratings.dat, nếu là file test_data.dat thì là 20
 
 import psycopg2
 import traceback
 import testHelper
-import Interface_metadata as MyAssignment
+import Interface as MyAssignment
 
 if __name__ == '__main__':
     try:
@@ -57,9 +57,11 @@ if __name__ == '__main__':
                 print("roundrobinpartition function fail")
 
             # ALERT:: Change the partition index according to your testing sequence.
-            [result, e] = testHelper.testroundrobininsert(MyAssignment, RATINGS_TABLE, 100, 1, 3, conn, '4')
+            # [result, e] = testHelper.testroundrobininsert(MyAssignment, RATINGS_TABLE, 100, 1, 3, conn, '0') nếu là file test_data.dat
             # [result, e] = testHelper.testroundrobininsert(MyAssignment, RATINGS_TABLE, 100, 1, 3, conn, '1')
             # [result, e] = testHelper.testroundrobininsert(MyAssignment, RATINGS_TABLE, 100, 1, 3, conn, '2')
+            [result, e] = testHelper.testroundrobininsert(MyAssignment, RATINGS_TABLE, 100, 1, 3, conn, '4')
+            # Vì file ratings.dat có 10000054 dòng dữ liệu nên khi insert bản ghi này vào sẽ ở phân mảnh thứ 4.
             if result :
                 print("roundrobininsert function pass!")
             else:

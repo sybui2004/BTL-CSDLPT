@@ -135,50 +135,63 @@ def get_rrobin_metadata(openconnection, tablename):
 @measure_time
 def loadratings(ratingstablename, ratingsfilepath, openconnection):
     # Tạo database 
-    create_db(DATABASE_NAME)
-    con = openconnection
-    cur = con.cursor()
+    create_db('dds_assgn1')
+
+    conn = openconnection
+    cur = conn.cursor()
 
     try:
-        # Tối ưu cấu hình PostgreSQL để tăng tốc độ ghi dữ liệu
-        cur.execute("SET synchronous_commit = OFF;")  # Không ghi log mỗi COMMIT (giảm I/O)
-        cur.execute("SET work_mem = '1024MB';")       # Tăng bộ nhớ cho các phép toán sort, hash
-        cur.execute("SET maintenance_work_mem = '2097151kB';")  # Tăng bộ nhớ cho các thao tác CREATE TABLE, COPY
+        # Tối ưu cấu hình PostgreSQL để tăng tốc độ INSERT/COPY
+        cur.execute("SET synchronous_commit = OFF;")  # Không cần ghi log ngay mỗi lần COMMIT
+        cur.execute("SET work_mem = '1024MB';")       # Tăng bộ nhớ RAM dùng cho các thao tác xử lý
+        cur.execute("SET maintenance_work_mem = '2097151kB';")  # Tăng RAM cho CREATE TABLE và COPY
 
-        # Tạo bảng ratings với fillfactor tối đa (giảm phân mảnh khi ghi dữ liệu liên tục)
+        # Tạo bảng nếu chưa có, với fillfactor=100 (giảm phân mảnh khi ghi nhiều)
         cur.execute(f"""
-            CREATE TABLE {ratingstablename}(
-                userid INTEGER, 
-                movieid INTEGER, 
+            CREATE TABLE IF NOT EXISTS {ratingstablename} (
+                userid INTEGER,
+                movieid INTEGER,
                 rating FLOAT
             ) WITH (fillfactor=100);
         """)
 
-        # Xử lý file input trước khi nạp: dùng bộ đệm lớn để giảm số lần đọc đĩa
-        processed_data = StringIO()
+        # Đọc file ratings từ đường dẫn `ratingsfilepath`
+        # - Mỗi dòng là một chuỗi string (dạng: "userid::movieid::rating::timestamp")
+        # - Dùng Polars đọc theo dòng (mỗi dòng là 1 row duy nhất)
+        lines = pl.read_csv(ratingsfilepath, separator="\n", has_header=False, new_columns=["line"])
 
-        with open(ratingsfilepath, 'r', encoding='utf-8', buffering=65536) as f:
-            for line in f:
-                parts = line.strip().split("::")  # Tách dòng theo '::'
-                if len(parts) >= 4:
-                    # Ghi ra format chuẩn: userid \t movieid \t rating
-                    processed_data.write(f"{parts[0]}\t{parts[1]}\t{parts[2]}\n")
+        # Tách từng dòng thành danh sách các trường (userid, movieid, rating)
+        df = lines.with_columns([
+            pl.col("line").str.split("::").alias("fields")
+        ]).select([
+            pl.col("fields").list.get(0).cast(pl.Int32).alias("userid"),
+            pl.col("fields").list.get(1).cast(pl.Int32).alias("movieid"),
+            pl.col("fields").list.get(2).cast(pl.Float32).alias("rating")  # timestamp bỏ qua
+        ])
+        # Ghi dữ liệu Polars DataFrame ra một file CSV tạm thời (để COPY vào PostgreSQL)
+        # - `include_header=False` vì PostgreSQL không cần dòng tiêu đề
+        with tempfile.NamedTemporaryFile(mode='w', delete=False, newline='', suffix=".csv") as tmpfile:
+            csv_path = tmpfile.name
+            df.write_csv(csv_path, include_header=False)
 
-        processed_data.seek(0)  # Quay về đầu file tạm
+        # Sử dụng COPY để import dữ liệu nhanh từ file CSV vào bảng PostgreSQL
+        with open(csv_path, 'r') as f:
+            cur.copy_expert(f"COPY {ratingstablename} FROM STDIN WITH (FORMAT CSV)", f)
 
-        # COPY trực tiếp từ buffer vào PostgreSQL
-        cur.copy_from(processed_data, ratingstablename, sep='\t', size=65536)
-
-        # Lưu thay đổi và đóng cursor
-        cur.close()
-        con.commit()
+        # Lưu thay đổi
+        conn.commit()
 
     except Exception as e:
-        # Nếu có lỗi thì rollback và đóng cursor
-        con.rollback()
-        cur.close()
+        # Nếu có lỗi thì rollback
+        conn.rollback()
         raise e
 
+    finally:
+        # Đóng cursor và xóa file tạm
+        cur.close()
+        if os.path.exists(csv_path):
+            os.remove(csv_path)
+        
 @measure_time
 def rangepartition(ratingstablename, numberofpartitions, openconnection):
     """
